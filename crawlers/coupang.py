@@ -57,23 +57,26 @@ class CoupangCrawler(BaseCrawler):
         return images
 
     def _parse_skus(self, soup: BeautifulSoup) -> list[SkuPrice]:
-        skus = []
-
-        # Try to extract from embedded JSON (sdp.bundle script)
         skus = self._parse_skus_from_script(soup)
         if skus:
             return skus
+        return self._parse_skus_from_html(soup)
 
-        # Fallback: parse option selectors + visible price
-        skus = self._parse_skus_from_html(soup)
-        return skus
+    def _to_sku_price(self, name: str, price: str, original_price: str | None = None, image: str | None = None) -> SkuPrice:
+        return SkuPrice(
+            external_sku_id=name,
+            sku_name=name,
+            price=price,
+            original_price=original_price,
+            currency="KRW",
+            image_url=image,
+        )
 
     def _parse_skus_from_script(self, soup: BeautifulSoup) -> list[SkuPrice]:
         """Extract SKU data from inline JavaScript/JSON in the page."""
         skus = []
         for script in soup.select("script"):
             text = script.string or ""
-            # Look for vendorItemMap or similar JSON structures
             match = re.search(r"vendorItemMap\s*=\s*(\{.*?\});", text, re.DOTALL)
             if not match:
                 match = re.search(r'"options"\s*:\s*(\[.*?\])', text, re.DOTALL)
@@ -82,16 +85,18 @@ class CoupangCrawler(BaseCrawler):
                     data = json.loads(match.group(1))
                     if isinstance(data, dict):
                         for key, item in data.items():
-                            skus.append(SkuPrice(
-                                sku_name=item.get("itemName", key),
+                            name = item.get("itemName", key)
+                            skus.append(self._to_sku_price(
+                                name=name,
                                 price=str(item.get("salesPrice", item.get("price", ""))),
                                 original_price=str(item.get("basePrice", "")) or None,
                                 image=item.get("image"),
                             ))
                     elif isinstance(data, list):
                         for item in data:
-                            skus.append(SkuPrice(
-                                sku_name=item.get("name", item.get("label", "")),
+                            name = item.get("name", item.get("label", ""))
+                            skus.append(self._to_sku_price(
+                                name=name,
                                 price=str(item.get("price", "")),
                                 original_price=str(item.get("originalPrice", "")) or None,
                                 image=item.get("image"),
@@ -109,24 +114,14 @@ class CoupangCrawler(BaseCrawler):
         original_el = soup.select_one("span.origin-price")
         original_price = original_el.get_text(strip=True) if original_el else None
 
-        # Check for option buttons/selectors
         option_items = soup.select("ul.prod-option__item li button, div.prod-option button")
         if option_items:
             for btn in option_items:
                 name = btn.get_text(strip=True)
                 if name:
-                    skus.append(SkuPrice(
-                        sku_name=name,
-                        price=price,
-                        original_price=original_price,
-                    ))
+                    skus.append(self._to_sku_price(name, price, original_price))
         else:
-            # Single SKU product
-            skus.append(SkuPrice(
-                sku_name="default",
-                price=price,
-                original_price=original_price,
-            ))
+            skus.append(self._to_sku_price("default", price, original_price))
 
         return skus
 

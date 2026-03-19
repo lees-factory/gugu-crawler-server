@@ -5,6 +5,29 @@ from playwright.sync_api import sync_playwright, Page
 
 from models.product import Product, SkuPrice
 
+CURRENCY_SYMBOL_MAP = {
+    "₩": "KRW",
+    "$": "USD",
+    "€": "EUR",
+    "¥": "CNY",
+    "£": "GBP",
+}
+
+
+def _extract_currency_and_number(text: str) -> tuple[str, str]:
+    """'₩1,217' -> ('KRW', '1217')"""
+    if not text:
+        return ("", "")
+    match = re.search(r"([₩$€¥£])\s?([\d,]+\.?\d*)", text)
+    if match:
+        symbol = match.group(1)
+        number = match.group(2).replace(",", "")
+        currency = CURRENCY_SYMBOL_MAP.get(symbol, symbol)
+        return (currency, number)
+    # fallback: just strip non-digits
+    number = re.sub(r"[^\d.]", "", text)
+    return ("", number)
+
 
 class AliexpressCrawler:
     SOURCE = "aliexpress"
@@ -72,17 +95,13 @@ class AliexpressCrawler:
             return []
 
     def _get_price(self, page: Page) -> tuple[str, str | None]:
-        """Returns (current_price, original_price)."""
+        """Returns (current_price, original_price) as raw strings like '₩1,217'."""
         try:
             result = page.evaluate('''() => {
-                // Current price: span with class like "price-kr--current--xxx"
                 const currentEl = document.querySelector('[class*="--current--"]');
                 const current = currentEl ? currentEl.textContent.trim() : "";
-
-                // Original price: div with class like "price-kr--originWrap--xxx"
                 const originEl = document.querySelector('[class*="--originWrap--"], [class*="--origin--"], [class*="--del--"]');
                 const origin = originEl ? originEl.textContent.trim() : null;
-
                 return {current, origin};
             }''')
         except Exception:
@@ -91,11 +110,9 @@ class AliexpressCrawler:
         current = result.get("current", "")
         origin = result.get("origin")
 
-        # Extract price strings (lines with currency/digits)
         def extract_price(text):
             if not text:
                 return None
-            # Extract only the currency + number part (e.g. "₩1,217" from "원가 ₩1,217")
             match = re.search(r"[₩$€¥£]\s?[\d,]+\.?\d*", text)
             if match:
                 return match.group(0)
@@ -104,6 +121,35 @@ class AliexpressCrawler:
             return prices[0] if prices else text
 
         return (extract_price(current) or "", extract_price(origin))
+
+    def _to_sku_price(self, sku_name: str, raw_price: str, raw_original: str | None, image: str | None) -> SkuPrice:
+        """Convert raw scraped data to unified SkuPrice format per mapping rules."""
+        # Split color / size from sku_name
+        color = None
+        size = None
+        if " / " in sku_name:
+            parts = sku_name.split(" / ", 1)
+            color = parts[0]
+            size = parts[1]
+        elif sku_name != "default":
+            color = sku_name
+
+        # Extract currency and numeric price
+        currency_p, price_num = _extract_currency_and_number(raw_price)
+        currency_o, original_num = _extract_currency_and_number(raw_original or "")
+        currency = currency_p or currency_o or ""
+
+        return SkuPrice(
+            external_sku_id=sku_name,
+            sku_name=sku_name,
+            color=color,
+            size=size,
+            price=price_num,
+            original_price=original_num or None,
+            currency=currency,
+            image_url=image,
+            sku_properties="",
+        )
 
     def _parse_skus(self, page: Page) -> list[SkuPrice]:
         color_items = page.locator('[class*="sku-item--image"]')
@@ -115,7 +161,7 @@ class AliexpressCrawler:
 
         if color_count == 0 and size_count == 0:
             price, original = self._get_price(page)
-            skus.append(SkuPrice(sku_name="default", price=price, original_price=original))
+            skus.append(self._to_sku_price("default", price, original, None))
             return skus
 
         colors = []
@@ -136,78 +182,28 @@ class AliexpressCrawler:
             sizes.append({"name": name, "index": i})
 
         if colors and sizes:
-            # Step 1: click first color, iterate all sizes to get base prices
-            color_items.nth(colors[0]["index"]).click(force=True)
+            # Color당 1개 SKU (첫 번째 size 기준) - Affiliate API 동일 동작
+            first_size = sizes[0]
+            size_items.nth(first_size["index"]).click(force=True)
             time.sleep(0.2)
-            base_prices = {}
-            for size in sizes:
-                size_items.nth(size["index"]).click(force=True)
-                time.sleep(0.2)
-                price, original = self._get_price(page)
-                base_prices[size["name"]] = (price, original)
-                skus.append(SkuPrice(
-                    sku_name=f"{colors[0]['name']} / {size['name']}",
-                    price=price,
-                    original_price=original,
-                    image=colors[0].get("image"),
-                ))
 
-            # Step 2: for other colors, click color + first size to check price
-            for color in colors[1:]:
+            for color in colors:
                 color_items.nth(color["index"]).click(force=True)
                 time.sleep(0.2)
-                size_items.nth(sizes[0]["index"]).click(force=True)
-                time.sleep(0.2)
-                check_price, check_original = self._get_price(page)
-
-                if check_price == base_prices[sizes[0]["name"]][0]:
-                    # Same price as first color → reuse base prices
-                    for size in sizes:
-                        bp, bo = base_prices[size["name"]]
-                        skus.append(SkuPrice(
-                            sku_name=f"{color['name']} / {size['name']}",
-                            price=bp,
-                            original_price=bo,
-                            image=color.get("image"),
-                        ))
-                else:
-                    # Different price → iterate all sizes for this color
-                    skus.append(SkuPrice(
-                        sku_name=f"{color['name']} / {sizes[0]['name']}",
-                        price=check_price,
-                        original_price=check_original,
-                        image=color.get("image"),
-                    ))
-                    for size in sizes[1:]:
-                        size_items.nth(size["index"]).click(force=True)
-                        time.sleep(0.2)
-                        price, original = self._get_price(page)
-                        skus.append(SkuPrice(
-                            sku_name=f"{color['name']} / {size['name']}",
-                            price=price,
-                            original_price=original,
-                            image=color.get("image"),
-                        ))
+                price, original = self._get_price(page)
+                sku_name = f"{color['name']} / {first_size['name']}"
+                skus.append(self._to_sku_price(sku_name, price, original, color.get("image")))
         elif colors:
             for color in colors:
                 color_items.nth(color["index"]).click(force=True)
                 time.sleep(0.3)
                 price, original = self._get_price(page)
-                skus.append(SkuPrice(
-                    sku_name=color["name"],
-                    price=price,
-                    original_price=original,
-                    image=color.get("image"),
-                ))
+                skus.append(self._to_sku_price(color["name"], price, original, color.get("image")))
         elif sizes:
             for size in sizes:
                 size_items.nth(size["index"]).click(force=True)
                 time.sleep(0.3)
                 price, original = self._get_price(page)
-                skus.append(SkuPrice(
-                    sku_name=size["name"],
-                    price=price,
-                    original_price=original,
-                ))
+                skus.append(self._to_sku_price(size["name"], price, original, None))
 
         return skus
