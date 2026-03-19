@@ -1,0 +1,255 @@
+openapi: 3.1.0
+info:
+  title: Gugu Crawler Server
+  version: 0.3.0
+  description: |
+    Coupang, AliExpress 상품 정보를 크롤링하는 FastAPI 서버.
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+tags:
+  - name: crawler
+    description: Product crawling endpoints
+  - name: system
+    description: Health check endpoint
+paths:
+  /crawl:
+    post:
+      tags:
+        - crawler
+      summary: Crawl a product page
+      description: |
+        상품 URL을 받아 지원 사이트(Coupang, AliExpress)의 상품 정보를 크롤링합니다.
+      operationId: crawlProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrawlRequest'
+            examples:
+              coupang:
+                summary: Coupang example
+                value:
+                  url: https://www.coupang.com/vp/products/1234567890
+              aliexpress:
+                summary: AliExpress example
+                value:
+                  url: https://www.aliexpress.com/item/1005001234567890.html
+      responses:
+        '200':
+          description: Crawling completed. Business-level failures are also returned in this response with `success: false`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrawlResponse'
+              examples:
+                success:
+                  summary: Successful crawl
+                  value:
+                    success: true
+                    data:
+                      title: Example Product
+                      url: https://www.coupang.com/vp/products/1234567890
+                      source: coupang
+                      skus:
+                        - external_sku_id: sku-1
+                          sku_name: Black / XL
+                          color: Black
+                          size: XL
+                          price: "12900"
+                          original_price: "15900"
+                          currency: KRW
+                          image_url: https://example.com/sku-1.jpg
+                          sku_properties: color=Black;size=XL
+                      main_image: https://example.com/main.jpg
+                      images:
+                        - https://example.com/detail-1.jpg
+                        - https://example.com/detail-2.jpg
+                    error: null
+                failure:
+                  summary: Crawl failed
+                  value:
+                    success: false
+                    data: null
+                    error: Timed out while loading the product page
+        '400':
+          description: Unsupported site or invalid URL handled by application logic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              examples:
+                unsupportedSite:
+                  summary: Unsupported site
+                  value:
+                    detail: Unsupported site: example.com
+        '422':
+          description: Request validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /health:
+    get:
+      tags:
+        - system
+      summary: Health check
+      description: 서버 상태를 확인합니다.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+components:
+  schemas:
+    CrawlRequest:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Product page URL from Coupang or AliExpress
+          examples:
+            - https://www.coupang.com/vp/products/1234567890
+    CrawlResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Indicates whether crawling succeeded
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/Product'
+            - type: 'null'
+          default: null
+        error:
+          anyOf:
+            - type: string
+            - type: 'null'
+          default: null
+    Product:
+      type: object
+      required:
+        - title
+        - url
+        - source
+        - skus
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        source:
+          type: string
+          description: Product source site
+          enum:
+            - coupang
+            - aliexpress
+        skus:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkuPrice'
+        main_image:
+          anyOf:
+            - type: string
+              format: uri
+            - type: 'null'
+          default: null
+        images:
+          type: array
+          items:
+            type: string
+            format: uri
+          default: []
+    SkuPrice:
+      type: object
+      required:
+        - external_sku_id
+        - sku_name
+        - price
+        - currency
+      properties:
+        external_sku_id:
+          type: string
+        sku_name:
+          type: string
+        color:
+          anyOf:
+            - type: string
+            - type: 'null'
+          default: null
+        size:
+          anyOf:
+            - type: string
+            - type: 'null'
+          default: null
+        price:
+          type: string
+          description: Crawled sale price as string
+        original_price:
+          anyOf:
+            - type: string
+            - type: 'null'
+          default: null
+        currency:
+          type: string
+          description: Currency code or symbol from source site
+        image_url:
+          anyOf:
+            - type: string
+              format: uri
+            - type: 'null'
+          default: null
+        sku_properties:
+          type: string
+          default: ""
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+    ErrorDetail:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+    HTTPValidationError:
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationError'
+    ValidationError:
+      type: object
+      required:
+        - loc
+        - msg
+        - type
+      properties:
+        loc:
+          type: array
+          items:
+            anyOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
