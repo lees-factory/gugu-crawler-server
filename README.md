@@ -2,7 +2,7 @@
 
 Coupang, AliExpress 상품 정보를 크롤링하는 FastAPI 서버.
 
-## 설치 및 실행
+## 설치
 
 ```bash
 # 가상환경 생성 및 활성화
@@ -15,9 +15,28 @@ pip install -r requirements.txt
 # Playwright 브라우저 설치
 playwright install chromium
 
-# 서버 실행
-uvicorn app:app --reload --port 8000
 ```
+
+## 실행 방법
+
+### 기본 실행
+
+```bash
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+- 기본 포트는 `8000`이다.
+- 로컬에서 확인할 때는 `http://localhost:8000`으로 접근하면 된다.
+
+### 포트 번호 변경
+
+다른 포트로 실행하려면 `--port` 값을 바꾸면 된다.
+
+```bash
+uvicorn app:app --reload --host 0.0.0.0 --port 8080
+```
+
+- 예를 들어 `8080`으로 실행했다면 API 호출 주소도 `http://localhost:8080`으로 변경해야 한다.
 
 ## API
 
