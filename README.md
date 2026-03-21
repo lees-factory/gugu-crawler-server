@@ -19,10 +19,32 @@ playwright install chromium
 
 ## 실행 방법
 
+먼저 가상환경을 활성화해야 한다.
+
+macOS / Linux:
+
+```bash
+source venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+venv\Scripts\Activate.ps1
+```
+
 ### 기본 실행
 
 ```bash
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+- 가상환경을 활성화하지 않았다면 `uvicorn: command not found` 같은 오류가 날 수 있다.
+- 이 경우 `source venv/bin/activate` 후 다시 실행한다.
+- 또는 아래처럼 가상환경 내부 실행 파일을 직접 호출해도 된다.
+
+```bash
+./venv/bin/uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 - 기본 포트는 `8000`이다.
