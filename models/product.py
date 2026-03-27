@@ -20,3 +20,18 @@ class Product(BaseModel):
     skus: list[SkuPrice]
     main_image: str | None = None
     images: list[str] = []
+
+
+class AliexpressSkuId(BaseModel):
+    sku_id: str
+    sku_attr: str
+    sku_name: str
+    salable: bool = True
+    sku_stock: int | None = None
+
+
+class AliexpressSkuIdResult(BaseModel):
+    title: str
+    url: str
+    source: str
+    sku_ids: list[AliexpressSkuId]

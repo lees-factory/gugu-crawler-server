@@ -1,9 +1,10 @@
 import re
 import time
+import json
 
 from playwright.sync_api import sync_playwright, Page
 
-from models.product import Product, SkuPrice
+from models.product import AliexpressSkuId, AliexpressSkuIdResult, Product, SkuPrice
 
 CURRENCY_SYMBOL_MAP = {
     "₩": "KRW",
@@ -56,6 +57,48 @@ class AliexpressCrawler:
             images=images,
         )
 
+    def crawl_sku_ids(self, url: str) -> AliexpressSkuIdResult:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            sku_payloads = []
+
+            def handle_response(response):
+                if "mtop.aliexpress.pdp.pc.query" not in response.url:
+                    return
+                try:
+                    body = response.text()
+                except Exception:
+                    return
+
+                payload = self._parse_jsonp_payload(body)
+                if not payload:
+                    return
+
+                ret = "".join(payload.get("ret") or [])
+                if "SUCCESS" in ret:
+                    sku_payloads.append(payload)
+
+            page.on("response", handle_response)
+            page.goto(url, wait_until="load", timeout=30000)
+            page.wait_for_timeout(5000)
+
+            self._close_popups(page)
+            title = self._parse_title(page)
+
+            browser.close()
+
+        if not sku_payloads:
+            raise ValueError("AliExpress prefetch response not found")
+
+        sku_items = self._extract_sku_ids_from_payload(sku_payloads[-1])
+        return AliexpressSkuIdResult(
+            title=title,
+            url=url,
+            source=self.SOURCE,
+            sku_ids=sku_items,
+        )
+
     def _close_popups(self, page: Page):
         page.evaluate('''() => {
             document.querySelectorAll(
@@ -93,6 +136,66 @@ class AliexpressCrawler:
             return result or []
         except Exception:
             return []
+
+    def _parse_jsonp_payload(self, body: str) -> dict | None:
+        match = re.search(r"mtopjsonp\d+\((.*)\)\s*$", body, re.S)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+
+    def _extract_sku_ids_from_payload(self, payload: dict) -> list[AliexpressSkuId]:
+        result = payload.get("data", {}).get("result", {})
+        sku_data = result.get("SKU", {})
+        sku_paths = sku_data.get("skuPaths") or []
+        sku_properties = sku_data.get("skuProperties") or []
+
+        property_lookup = self._build_sku_property_lookup(sku_properties)
+        sku_items = []
+
+        for sku_path in sku_paths:
+            sku_id = str(sku_path.get("skuIdStr") or sku_path.get("skuId") or "").strip()
+            sku_attr = sku_path.get("skuAttr") or ""
+            if not sku_id:
+                continue
+
+            sku_items.append(
+                AliexpressSkuId(
+                    sku_id=sku_id,
+                    sku_attr=sku_attr,
+                    sku_name=self._build_sku_name_from_attr(sku_attr, property_lookup),
+                    salable=bool(sku_path.get("salable", True)),
+                    sku_stock=sku_path.get("skuStock"),
+                )
+            )
+
+        return sku_items
+
+    def _build_sku_property_lookup(self, sku_properties: list[dict]) -> dict[str, str]:
+        property_lookup = {}
+        for sku_property in sku_properties:
+            property_id = str(sku_property.get("skuPropertyId"))
+            for value in sku_property.get("skuPropertyValues") or []:
+                value_id = str(value.get("propertyValueIdLong"))
+                label = (
+                    value.get("propertyValueDisplayName")
+                    or value.get("propertyValueName")
+                    or value.get("propertyValueDefinitionName")
+                    or value_id
+                )
+                property_lookup[f"{property_id}:{value_id}"] = label
+        return property_lookup
+
+    def _build_sku_name_from_attr(self, sku_attr: str, property_lookup: dict[str, str]) -> str:
+        labels = []
+        for raw_part in sku_attr.split(";"):
+            part = raw_part.split("#", 1)[0].strip()
+            if not part:
+                continue
+            labels.append(property_lookup.get(part, raw_part.strip()))
+        return " / ".join(labels)
 
     def _get_price(self, page: Page) -> tuple[str, str | None]:
         """Returns (current_price, original_price) as raw strings like '₩1,217'."""

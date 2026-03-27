@@ -38,7 +38,8 @@ paths:
                   url: https://www.aliexpress.com/item/1005001234567890.html
       responses:
         '200':
-          description: Crawling completed. Business-level failures are also returned in this response with `success: false`.
+          description: |
+            Crawling completed. Business-level failures are also returned in this response with `success: false`.
           content:
             application/json:
               schema:
@@ -83,7 +84,74 @@ paths:
                 unsupportedSite:
                   summary: Unsupported site
                   value:
-                    detail: Unsupported site: example.com
+                    detail: "Unsupported site: example.com"
+        '422':
+          description: Request validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /aliexpress/sku-ids:
+    post:
+      tags:
+        - crawler
+      summary: Extract AliExpress skuIds from detail prefetch data
+      description: |
+        AliExpress 상품 상세 페이지의 prefetch 응답에서 옵션별 `skuId`를 직접 추출합니다.
+        `Buy Now` 클릭이나 주문 페이지 이동 없이 SKU 매핑만 수집합니다.
+      operationId: crawlAliexpressSkuIds
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrawlRequest'
+            examples:
+              aliexpress:
+                summary: AliExpress example
+                value:
+                  url: https://ko.aliexpress.com/item/1005008490468691.html
+      responses:
+        '200':
+          description: |
+            SKU ID extraction completed. Business-level failures are also returned in this response with `success: false`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliexpressSkuIdsResponse'
+              examples:
+                success:
+                  summary: Successful skuId extraction
+                  value:
+                    success: true
+                    data:
+                      title: Example Product
+                      url: https://ko.aliexpress.com/item/1005008490468691.html
+                      source: aliexpress
+                      sku_ids:
+                        - sku_id: "12000045374840879"
+                          sku_attr: "14:771#FT-Black-R0101;5:361385"
+                          sku_name: "FT-Black-R0101 / S"
+                          salable: true
+                          sku_stock: 499
+                    error: null
+                failure:
+                  summary: Extraction failed
+                  value:
+                    success: false
+                    data: null
+                    error: AliExpress prefetch response not found
+        '400':
+          description: Invalid URL or non-AliExpress URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              examples:
+                notAliExpress:
+                  summary: Non-AliExpress URL
+                  value:
+                    detail: AliExpress URL only
         '422':
           description: Request validation error
           content:
@@ -137,6 +205,23 @@ components:
             - type: string
             - type: 'null'
           default: null
+    AliexpressSkuIdsResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/AliexpressSkuIdResult'
+            - type: 'null'
+          default: null
+        error:
+          anyOf:
+            - type: string
+            - type: 'null'
+          default: null
     Product:
       type: object
       required:
@@ -172,6 +257,48 @@ components:
             type: string
             format: uri
           default: []
+    AliexpressSkuIdResult:
+      type: object
+      required:
+        - title
+        - url
+        - source
+        - sku_ids
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        source:
+          type: string
+          enum:
+            - aliexpress
+        sku_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/AliexpressSkuId'
+    AliexpressSkuId:
+      type: object
+      required:
+        - sku_id
+        - sku_attr
+        - sku_name
+        - salable
+      properties:
+        sku_id:
+          type: string
+        sku_attr:
+          type: string
+        sku_name:
+          type: string
+        salable:
+          type: boolean
+        sku_stock:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          default: null
     SkuPrice:
       type: object
       required:

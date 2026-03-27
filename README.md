@@ -33,6 +33,12 @@ Windows PowerShell:
 venv\Scripts\Activate.ps1
 ```
 
+가상환경을 종료하려면 아래 명령어를 실행한다.
+
+```bash
+deactivate
+```
+
 ### 기본 실행
 
 ```bash
