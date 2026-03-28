@@ -1,0 +1,14 @@
+[Unit]
+Description=Gugu Crawler Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gugu-crawler
+ExecStart=/home/ubuntu/gugu-crawler/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
