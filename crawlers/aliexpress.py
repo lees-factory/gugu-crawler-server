@@ -1,10 +1,10 @@
 import re
-import time
 import json
+import time
 
 from playwright.sync_api import sync_playwright, Page
 
-from models.product import AliexpressSkuId, AliexpressSkuIdResult, Product, SkuPrice
+from models.product import Product, SkuPrice
 
 CURRENCY_SYMBOL_MAP = {
     "₩": "KRW",
@@ -25,7 +25,6 @@ def _extract_currency_and_number(text: str) -> tuple[str, str]:
         number = match.group(2).replace(",", "")
         currency = CURRENCY_SYMBOL_MAP.get(symbol, symbol)
         return (currency, number)
-    # fallback: just strip non-digits
     number = re.sub(r"[^\d.]", "", text)
     return ("", number)
 
@@ -37,31 +36,7 @@ class AliexpressCrawler:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=30000)
-
-            self._close_popups(page)
-
-            title = self._parse_title(page)
-            main_image = self._parse_main_image(page)
-            images = self._parse_images(page)
-            skus = self._parse_skus(page)
-
-            browser.close()
-
-        return Product(
-            title=title,
-            url=url,
-            source=self.SOURCE,
-            skus=skus,
-            main_image=main_image,
-            images=images,
-        )
-
-    def crawl_sku_ids(self, url: str) -> AliexpressSkuIdResult:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            sku_payloads = []
+            sku_payloads: list[dict] = []
 
             def handle_response(response):
                 if "mtop.aliexpress.pdp.pc.query" not in response.url:
@@ -70,11 +45,9 @@ class AliexpressCrawler:
                     body = response.text()
                 except Exception:
                     return
-
                 payload = self._parse_jsonp_payload(body)
                 if not payload:
                     return
-
                 ret = "".join(payload.get("ret") or [])
                 if "SUCCESS" in ret:
                     sku_payloads.append(payload)
@@ -85,19 +58,33 @@ class AliexpressCrawler:
 
             self._close_popups(page)
             title = self._parse_title(page)
+            main_image = self._parse_main_image(page)
+            images = self._parse_images(page)
 
             browser.close()
 
         if not sku_payloads:
             raise ValueError("AliExpress prefetch response not found")
 
-        sku_items = self._extract_sku_ids_from_payload(sku_payloads[-1])
-        return AliexpressSkuIdResult(
+        payload = sku_payloads[-1]
+        skus = self._extract_skus_from_payload(payload)
+
+        payload_images = self._extract_images_from_payload(payload)
+        if not main_image and payload_images:
+            main_image = payload_images[0]
+        if not images:
+            images = payload_images
+
+        return Product(
             title=title,
             url=url,
             source=self.SOURCE,
-            sku_ids=sku_items,
+            skus=skus,
+            main_image=main_image,
+            images=images,
         )
+
+    # --- Page parsing (DOM) ---
 
     def _close_popups(self, page: Page):
         page.evaluate('''() => {
@@ -137,6 +124,8 @@ class AliexpressCrawler:
         except Exception:
             return []
 
+    # --- JSONP parsing ---
+
     def _parse_jsonp_payload(self, body: str) -> dict | None:
         match = re.search(r"mtopjsonp\d+\((.*)\)\s*$", body, re.S)
         if not match:
@@ -146,14 +135,19 @@ class AliexpressCrawler:
         except json.JSONDecodeError:
             return None
 
-    def _extract_sku_ids_from_payload(self, payload: dict) -> list[AliexpressSkuId]:
+    # --- Payload extraction ---
+
+    def _extract_skus_from_payload(self, payload: dict) -> list[SkuPrice]:
         result = payload.get("data", {}).get("result", {})
         sku_data = result.get("SKU", {})
         sku_paths = sku_data.get("skuPaths") or []
         sku_properties = sku_data.get("skuProperties") or []
 
         property_lookup = self._build_sku_property_lookup(sku_properties)
-        sku_items = []
+        image_lookup = self._build_sku_image_lookup(sku_properties)
+        price_lookup = self._build_sku_price_lookup(sku_data, result)
+
+        skus: list[SkuPrice] = []
 
         for sku_path in sku_paths:
             sku_id = str(sku_path.get("skuIdStr") or sku_path.get("skuId") or "").strip()
@@ -161,32 +155,154 @@ class AliexpressCrawler:
             if not sku_id:
                 continue
 
-            sku_items.append(
-                AliexpressSkuId(
-                    sku_id=sku_id,
-                    sku_attr=sku_attr,
-                    sku_name=self._build_sku_name_from_attr(sku_attr, property_lookup),
-                    salable=bool(sku_path.get("salable", True)),
-                    sku_stock=sku_path.get("skuStock"),
-                )
-            )
+            sku_name = self._build_sku_name_from_attr(sku_attr, property_lookup)
+            color, size = self._parse_color_size(sku_name)
+            image_url = self._resolve_sku_image(sku_attr, image_lookup)
 
-        return sku_items
+            price_info = price_lookup.get(sku_id, {})
+            currency = price_info.get("currency", "")
+            price = price_info.get("price", "")
+            original_price = price_info.get("original_price")
+
+            skus.append(SkuPrice(
+                external_sku_id=sku_id,
+                sku_name=sku_name,
+                color=color,
+                size=size,
+                price=price,
+                original_price=original_price,
+                currency=currency,
+                image_url=image_url,
+                salable=bool(sku_path.get("salable", True)),
+                sku_stock=sku_path.get("skuStock"),
+            ))
+
+        return skus
 
     def _build_sku_property_lookup(self, sku_properties: list[dict]) -> dict[str, str]:
-        property_lookup = {}
-        for sku_property in sku_properties:
-            property_id = str(sku_property.get("skuPropertyId"))
-            for value in sku_property.get("skuPropertyValues") or []:
-                value_id = str(value.get("propertyValueIdLong"))
+        lookup: dict[str, str] = {}
+        for prop in sku_properties:
+            pid = str(prop.get("skuPropertyId"))
+            for val in prop.get("skuPropertyValues") or []:
+                vid = str(val.get("propertyValueIdLong"))
                 label = (
-                    value.get("propertyValueDisplayName")
-                    or value.get("propertyValueName")
-                    or value.get("propertyValueDefinitionName")
-                    or value_id
+                    val.get("propertyValueDisplayName")
+                    or val.get("propertyValueName")
+                    or val.get("propertyValueDefinitionName")
+                    or vid
                 )
-                property_lookup[f"{property_id}:{value_id}"] = label
-        return property_lookup
+                lookup[f"{pid}:{vid}"] = label
+        return lookup
+
+    def _build_sku_image_lookup(self, sku_properties: list[dict]) -> dict[str, str]:
+        """Build valueId -> image_url mapping from skuProperties."""
+        lookup: dict[str, str] = {}
+        for prop in sku_properties:
+            pid = str(prop.get("skuPropertyId"))
+            for val in prop.get("skuPropertyValues") or []:
+                vid = str(val.get("propertyValueIdLong"))
+                img = (
+                    val.get("skuPropertyImagePath")
+                    or val.get("skuPropertyImageSummPath")
+                    or val.get("skuPropertyTips")
+                )
+                if img and img.startswith(("http", "//")):
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    lookup[f"{pid}:{vid}"] = img
+        return lookup
+
+    def _build_sku_price_lookup(self, sku_data: dict, result: dict) -> dict[str, dict]:
+        """Build skuId -> {price, original_price, currency} from payload."""
+        lookup: dict[str, dict] = {}
+
+        # Strategy 1: skuPriceList (most common)
+        for item in sku_data.get("skuPriceList") or []:
+            sku_id = str(item.get("skuIdStr") or item.get("skuId") or "")
+            if not sku_id:
+                continue
+            sku_val = item.get("skuVal") or {}
+            lookup[sku_id] = self._parse_price_from_sku_val(sku_val)
+
+        if lookup:
+            return lookup
+
+        # Strategy 2: priceModule at result level
+        price_module = result.get("priceModule") or {}
+        sku_price_list = price_module.get("skuPriceList") or []
+        for item in sku_price_list:
+            sku_id = str(item.get("skuIdStr") or item.get("skuId") or "")
+            if not sku_id:
+                continue
+            sku_val = item.get("skuVal") or item
+            lookup[sku_id] = self._parse_price_from_sku_val(sku_val)
+
+        return lookup
+
+    def _parse_price_from_sku_val(self, sku_val: dict) -> dict:
+        """Extract price info from a skuVal object."""
+        # Try activity/discounted price first, then regular price
+        activity = sku_val.get("skuActivityAmount") or sku_val.get("skuAmount") or {}
+        original = sku_val.get("skuAmount") or sku_val.get("skuOriginalAmount") or {}
+
+        # If activity == original, check for separate discount field
+        act_price = activity.get("value")
+        orig_price = original.get("value")
+        currency_code = activity.get("currency") or original.get("currency") or ""
+
+        # Fallback: string-based fields
+        if act_price is None:
+            act_str = (
+                sku_val.get("skuCalPrice")
+                or sku_val.get("skuActivityAmountDisplay")
+                or sku_val.get("skuAmountDisplay")
+                or ""
+            )
+            c, n = _extract_currency_and_number(str(act_str))
+            act_price = n
+            currency_code = currency_code or c
+
+        if orig_price is None:
+            orig_str = (
+                sku_val.get("skuOriginalPrice")
+                or sku_val.get("skuAmountDisplay")
+                or ""
+            )
+            _, n = _extract_currency_and_number(str(orig_str))
+            orig_price = n if n else None
+
+        price_str = str(int(act_price)) if isinstance(act_price, float) else str(act_price or "")
+        orig_str = None
+        if orig_price and str(orig_price) != price_str:
+            orig_str = str(int(orig_price)) if isinstance(orig_price, float) else str(orig_price)
+
+        return {
+            "price": price_str,
+            "original_price": orig_str,
+            "currency": currency_code,
+        }
+
+    def _extract_images_from_payload(self, payload: dict) -> list[str]:
+        """Extract product images from payload."""
+        result = payload.get("data", {}).get("result", {})
+
+        # Try imageModule
+        image_module = result.get("imageModule") or {}
+        images = image_module.get("imagePathList") or []
+        if images:
+            return [self._normalize_url(img) for img in images if img]
+
+        # Try top-level imagePathList
+        images = result.get("imagePathList") or []
+        if images:
+            return [self._normalize_url(img) for img in images if img]
+
+        return []
+
+    def _normalize_url(self, url: str) -> str:
+        if url.startswith("//"):
+            return "https:" + url
+        return url
 
     def _build_sku_name_from_attr(self, sku_attr: str, property_lookup: dict[str, str]) -> str:
         labels = []
@@ -197,116 +313,18 @@ class AliexpressCrawler:
             labels.append(property_lookup.get(part, raw_part.strip()))
         return " / ".join(labels)
 
-    def _get_price(self, page: Page) -> tuple[str, str | None]:
-        """Returns (current_price, original_price) as raw strings like '₩1,217'."""
-        try:
-            result = page.evaluate('''() => {
-                const currentEl = document.querySelector('[class*="--current--"]');
-                const current = currentEl ? currentEl.textContent.trim() : "";
-                const originEl = document.querySelector('[class*="--originWrap--"], [class*="--origin--"], [class*="--del--"]');
-                const origin = originEl ? originEl.textContent.trim() : null;
-                return {current, origin};
-            }''')
-        except Exception:
-            return ("", None)
-
-        current = result.get("current", "")
-        origin = result.get("origin")
-
-        def extract_price(text):
-            if not text:
-                return None
-            match = re.search(r"[₩$€¥£]\s?[\d,]+\.?\d*", text)
-            if match:
-                return match.group(0)
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-            prices = [l for l in lines if re.search(r"[\d₩$€¥£]", l)]
-            return prices[0] if prices else text
-
-        return (extract_price(current) or "", extract_price(origin))
-
-    def _to_sku_price(self, sku_name: str, raw_price: str, raw_original: str | None, image: str | None) -> SkuPrice:
-        """Convert raw scraped data to unified SkuPrice format per mapping rules."""
-        # Split color / size from sku_name
-        color = None
-        size = None
+    def _parse_color_size(self, sku_name: str) -> tuple[str | None, str | None]:
         if " / " in sku_name:
             parts = sku_name.split(" / ", 1)
-            color = parts[0]
-            size = parts[1]
-        elif sku_name != "default":
-            color = sku_name
+            return parts[0], parts[1]
+        if sku_name and sku_name != "default":
+            return sku_name, None
+        return None, None
 
-        # Extract currency and numeric price
-        currency_p, price_num = _extract_currency_and_number(raw_price)
-        currency_o, original_num = _extract_currency_and_number(raw_original or "")
-        currency = currency_p or currency_o or ""
-
-        return SkuPrice(
-            external_sku_id=sku_name,
-            sku_name=sku_name,
-            color=color,
-            size=size,
-            price=price_num,
-            original_price=original_num or None,
-            currency=currency,
-            image_url=image,
-            sku_properties="",
-        )
-
-    def _parse_skus(self, page: Page) -> list[SkuPrice]:
-        color_items = page.locator('[class*="sku-item--image"]')
-        size_items = page.locator('[class*="sku-item--text"]')
-        color_count = color_items.count()
-        size_count = size_items.count()
-
-        skus = []
-
-        if color_count == 0 and size_count == 0:
-            price, original = self._get_price(page)
-            skus.append(self._to_sku_price("default", price, original, None))
-            return skus
-
-        colors = []
-        for i in range(color_count):
-            item = color_items.nth(i)
-            name = item.get_attribute("title") or ""
-            if not name:
-                img = item.locator("img").first
-                name = img.get_attribute("alt") or f"color_{i}"
-            img_el = item.locator("img").first
-            img_src = img_el.get_attribute("src") if img_el.count() > 0 else None
-            colors.append({"name": name, "image": img_src, "index": i})
-
-        sizes = []
-        for i in range(size_count):
-            item = size_items.nth(i)
-            name = item.get_attribute("title") or item.inner_text().strip()
-            sizes.append({"name": name, "index": i})
-
-        if colors and sizes:
-            # Color당 1개 SKU (첫 번째 size 기준) - Affiliate API 동일 동작
-            first_size = sizes[0]
-            size_items.nth(first_size["index"]).click(force=True)
-            time.sleep(0.2)
-
-            for color in colors:
-                color_items.nth(color["index"]).click(force=True)
-                time.sleep(0.2)
-                price, original = self._get_price(page)
-                sku_name = f"{color['name']} / {first_size['name']}"
-                skus.append(self._to_sku_price(sku_name, price, original, color.get("image")))
-        elif colors:
-            for color in colors:
-                color_items.nth(color["index"]).click(force=True)
-                time.sleep(0.3)
-                price, original = self._get_price(page)
-                skus.append(self._to_sku_price(color["name"], price, original, color.get("image")))
-        elif sizes:
-            for size in sizes:
-                size_items.nth(size["index"]).click(force=True)
-                time.sleep(0.3)
-                price, original = self._get_price(page)
-                skus.append(self._to_sku_price(size["name"], price, original, None))
-
-        return skus
+    def _resolve_sku_image(self, sku_attr: str, image_lookup: dict[str, str]) -> str | None:
+        """Find image for a SKU by checking its attribute values against image lookup."""
+        for raw_part in sku_attr.split(";"):
+            key = raw_part.split("#", 1)[0].strip()
+            if key in image_lookup:
+                return image_lookup[key]
+        return None
