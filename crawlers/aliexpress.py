@@ -173,8 +173,6 @@ class AliexpressCrawler:
                 original_price=original_price,
                 currency=currency,
                 image_url=image_url,
-                salable=bool(sku_path.get("salable", True)),
-                sku_stock=sku_path.get("skuStock"),
             ))
 
         return skus

@@ -63,8 +63,6 @@ paths:
                           currency: KRW
                           image_url: https://example.com/sku-1.jpg
                           sku_properties: ""
-                          salable: true
-                          sku_stock: 499
                       main_image: https://example.com/main.jpg
                       images:
                         - https://example.com/detail-1.jpg
@@ -217,14 +215,6 @@ components:
         sku_properties:
           type: string
           default: ""
-        salable:
-          type: boolean
-          default: true
-        sku_stock:
-          anyOf:
-            - type: integer
-            - type: 'null'
-          default: null
     HealthResponse:
       type: object
       required:

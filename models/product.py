@@ -11,8 +11,6 @@ class SkuPrice(BaseModel):
     currency: str
     image_url: str | None = None
     sku_properties: str = ""
-    salable: bool = True
-    sku_stock: int | None = None
 
 
 class Product(BaseModel):
