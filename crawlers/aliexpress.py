@@ -211,74 +211,44 @@ class AliexpressCrawler:
         return lookup
 
     def _build_sku_price_lookup(self, sku_data: dict, result: dict) -> dict[str, dict]:
-        """Build skuId -> {price, original_price, currency} from payload."""
+        """Build skuId -> {price, original_price, currency} from PRICE.skuPriceInfoMap."""
         lookup: dict[str, dict] = {}
 
-        # Strategy 1: skuPriceList (most common)
-        for item in sku_data.get("skuPriceList") or []:
-            sku_id = str(item.get("skuIdStr") or item.get("skuId") or "")
-            if not sku_id:
-                continue
-            sku_val = item.get("skuVal") or {}
-            lookup[sku_id] = self._parse_price_from_sku_val(sku_val)
+        price_section = result.get("PRICE", {})
+        price_map = price_section.get("skuPriceInfoMap") or price_section.get("skuIdStrPriceInfoMap") or {}
 
-        if lookup:
-            return lookup
+        for sku_id, info in price_map.items():
+            original = info.get("originalPrice") or {}
+            currency = original.get("currency", "")
+            orig_value = original.get("value")
 
-        # Strategy 2: priceModule at result level
-        price_module = result.get("priceModule") or {}
-        sku_price_list = price_module.get("skuPriceList") or []
-        for item in sku_price_list:
-            sku_id = str(item.get("skuIdStr") or item.get("skuId") or "")
-            if not sku_id:
-                continue
-            sku_val = item.get("skuVal") or item
-            lookup[sku_id] = self._parse_price_from_sku_val(sku_val)
+            # salePriceLocal format: "₩10,028|10028|"
+            sale_price_local = info.get("salePriceLocal") or ""
+            parts = sale_price_local.split("|")
+            sale_value = parts[1] if len(parts) >= 2 and parts[1] else None
+
+            # Fallback: parse from salePriceString "₩10,028"
+            if not sale_value:
+                _, sale_value = _extract_currency_and_number(info.get("salePriceString") or "")
+
+            price_str = sale_value or ""
+            orig_str = None
+            if orig_value is not None:
+                orig_str = str(int(orig_value)) if isinstance(orig_value, float) else str(orig_value)
+                if orig_str == price_str:
+                    orig_str = None
+
+            if not currency and sale_price_local:
+                c, _ = _extract_currency_and_number(sale_price_local.split("|")[0])
+                currency = c
+
+            lookup[sku_id] = {
+                "price": price_str,
+                "original_price": orig_str,
+                "currency": currency,
+            }
 
         return lookup
-
-    def _parse_price_from_sku_val(self, sku_val: dict) -> dict:
-        """Extract price info from a skuVal object."""
-        # Try activity/discounted price first, then regular price
-        activity = sku_val.get("skuActivityAmount") or sku_val.get("skuAmount") or {}
-        original = sku_val.get("skuAmount") or sku_val.get("skuOriginalAmount") or {}
-
-        # If activity == original, check for separate discount field
-        act_price = activity.get("value")
-        orig_price = original.get("value")
-        currency_code = activity.get("currency") or original.get("currency") or ""
-
-        # Fallback: string-based fields
-        if act_price is None:
-            act_str = (
-                sku_val.get("skuCalPrice")
-                or sku_val.get("skuActivityAmountDisplay")
-                or sku_val.get("skuAmountDisplay")
-                or ""
-            )
-            c, n = _extract_currency_and_number(str(act_str))
-            act_price = n
-            currency_code = currency_code or c
-
-        if orig_price is None:
-            orig_str = (
-                sku_val.get("skuOriginalPrice")
-                or sku_val.get("skuAmountDisplay")
-                or ""
-            )
-            _, n = _extract_currency_and_number(str(orig_str))
-            orig_price = n if n else None
-
-        price_str = str(int(act_price)) if isinstance(act_price, float) else str(act_price or "")
-        orig_str = None
-        if orig_price and str(orig_price) != price_str:
-            orig_str = str(int(orig_price)) if isinstance(orig_price, float) else str(orig_price)
-
-        return {
-            "price": price_str,
-            "original_price": orig_str,
-            "currency": currency_code,
-        }
 
     def _extract_images_from_payload(self, payload: dict) -> list[str]:
         """Extract product images from payload."""
