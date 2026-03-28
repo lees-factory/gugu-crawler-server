@@ -3,6 +3,9 @@ set -e
 
 cd /home/ubuntu/gugu-crawler
 
+sudo apt-get update -y
+sudo apt-get install -y python3-venv python3-pip
+
 python3 -m venv venv
 source venv/bin/activate
 
