@@ -13,4 +13,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 
+sudo cp scripts/gugu-crawler.service /etc/systemd/system/gugu-crawler.service
+sudo systemctl daemon-reload
+sudo systemctl enable gugu-crawler
 sudo systemctl restart gugu-crawler
